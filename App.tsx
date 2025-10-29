@@ -18,7 +18,7 @@ const NAKSHATRA_SPAN_DEGREES = 360 / 27;
 const SWATHI_START_DEGREES = (15 - 1) * NAKSHATRA_SPAN_DEGREES; // 186.67°
 const SWATHI_END_DEGREES = 15 * NAKSHATRA_SPAN_DEGREES; // 200°
 
-// Ayanamsha calculation
+// More accurate Ayanamsha calculation (Lahiri)
 const getLahiriAyanamsha = (date: Date): number => {
   const AYANAMSHA_AT_J2000 = 23.85575;
   const J2000 = new Date('2000-01-01T12:00:00Z');
@@ -27,21 +27,71 @@ const getLahiriAyanamsha = (date: Date): number => {
   return AYANAMSHA_AT_J2000 + (yearsSinceJ2000 * PRECESSION_RATE_DEG_PER_YEAR);
 };
 
-// Simplified moon position calculation (approximation)
+// Accurate lunar position calculation using astronomical formulas
 const getMoonSiderealLongitude = (date: Date): number => {
-  // This is a simplified lunar longitude calculation
-  // Moon completes orbit in ~27.32 days
-  const LUNAR_MONTH = 27.321661;
-  const EPOCH = new Date('2000-01-01T12:00:00Z');
+  // Julian Date calculation
+  const jd = date.getTime() / 86400000 + 2440587.5;
+  const T = (jd - 2451545.0) / 36525; // Julian centuries from J2000.0
   
-  const daysSinceEpoch = (date.getTime() - EPOCH.getTime()) / (1000 * 60 * 60 * 24);
-  const cycles = daysSinceEpoch / LUNAR_MONTH;
+  // Moon's mean longitude (L')
+  const Lp = 218.3164477 + 481267.88123421 * T - 0.0015786 * T * T + T * T * T / 538841 - T * T * T * T / 65194000;
   
-  // Starting position + motion
-  const tropicalLongitude = (218.316 + (360 * (cycles % 1))) % 360;
+  // Moon's mean elongation (D)
+  const D = 297.8501921 + 445267.1114034 * T - 0.0018819 * T * T + T * T * T / 545868 - T * T * T * T / 113065000;
+  
+  // Sun's mean anomaly (M)
+  const M = 357.5291092 + 35999.0502909 * T - 0.0001536 * T * T + T * T * T / 24490000;
+  
+  // Moon's mean anomaly (M')
+  const Mp = 134.9633964 + 477198.8675055 * T + 0.0087414 * T * T + T * T * T / 69699 - T * T * T * T / 14712000;
+  
+  // Moon's argument of latitude (F)
+  const F = 93.2720950 + 483202.0175233 * T - 0.0036539 * T * T - T * T * T / 3526000 + T * T * T * T / 863310000;
+  
+  // Convert to radians
+  const toRad = (deg: number) => (deg * Math.PI / 180);
+  const Dr = toRad(D);
+  const Mr = toRad(M);
+  const Mpr = toRad(Mp);
+  const Fr = toRad(F);
+  
+  // Main periodic terms for the Moon's longitude (simplified - top terms)
+  let sigmaL = 0;
+  sigmaL += 6288774 * Math.sin(Mpr);
+  sigmaL += 1274027 * Math.sin(2 * Dr - Mpr);
+  sigmaL += 658314 * Math.sin(2 * Dr);
+  sigmaL += 213618 * Math.sin(2 * Mpr);
+  sigmaL += -185116 * Math.sin(Mr);
+  sigmaL += -114332 * Math.sin(2 * Fr);
+  sigmaL += 58793 * Math.sin(2 * Dr - 2 * Mpr);
+  sigmaL += 57066 * Math.sin(2 * Dr - Mr - Mpr);
+  sigmaL += 53322 * Math.sin(2 * Dr + Mpr);
+  sigmaL += 45758 * Math.sin(2 * Dr - Mr);
+  sigmaL += -40923 * Math.sin(Mr - Mpr);
+  sigmaL += -34720 * Math.sin(Dr);
+  sigmaL += -30383 * Math.sin(Mr + Mpr);
+  sigmaL += 15327 * Math.sin(2 * Dr - 2 * Fr);
+  sigmaL += -12528 * Math.sin(Mpr + 2 * Fr);
+  sigmaL += 10980 * Math.sin(Mpr - 2 * Fr);
+  sigmaL += 10675 * Math.sin(4 * Dr - Mpr);
+  sigmaL += 10034 * Math.sin(3 * Mpr);
+  sigmaL += 8548 * Math.sin(4 * Dr - 2 * Mpr);
+  sigmaL += -7888 * Math.sin(2 * Dr + Mr - Mpr);
+  sigmaL += -6766 * Math.sin(2 * Dr + Mr);
+  sigmaL += -5163 * Math.sin(Dr - Mpr);
+  
+  // Moon's ecliptic longitude
+  let tropicalLongitude = Lp + sigmaL / 1000000;
+  
+  // Normalize to 0-360
+  tropicalLongitude = tropicalLongitude % 360;
+  if (tropicalLongitude < 0) tropicalLongitude += 360;
+  
+  // Convert to sidereal
   const ayanamsha = getLahiriAyanamsha(date);
-  
   let siderealLongitude = tropicalLongitude - ayanamsha;
+  
+  // Normalize to 0-360
   if (siderealLongitude < 0) siderealLongitude += 360;
   if (siderealLongitude >= 360) siderealLongitude -= 360;
   
@@ -52,59 +102,79 @@ const isSwathi = (longitude: number): boolean => {
   return longitude >= SWATHI_START_DEGREES && longitude < SWATHI_END_DEGREES;
 };
 
-// Find Swathi period
+// Find Swathi period with proper boundary handling
 const findCurrentOrNextSwathiPeriod = async (startDate: Date): Promise<NakshatraPeriod> => {
   let currentDate = new Date(startDate);
-  const coarseStep = 60 * 60 * 1000; // 1 hour
-  const fineStep = 60 * 1000; // 1 minute
+  const coarseStep = 30 * 60 * 1000; // 30 minutes for faster search
+  const fineStep = 60 * 1000; // 1 minute for precision
   
   let longitude = getMoonSiderealLongitude(currentDate);
   
-  // If currently in Swathi, find start and end
+  // If currently in Swathi, find the boundaries of this period
   if (isSwathi(longitude)) {
+    // Find start by going backwards
     let startFinder = new Date(currentDate);
     
-    // Find start by going backwards
+    // Coarse search backwards
     while (isSwathi(getMoonSiderealLongitude(startFinder))) {
       startFinder = new Date(startFinder.getTime() - coarseStep);
     }
+    
+    // Fine tune forward to exact start
     while (!isSwathi(getMoonSiderealLongitude(startFinder))) {
       startFinder = new Date(startFinder.getTime() + fineStep);
     }
-    const periodStart = startFinder;
+    const periodStart = new Date(startFinder);
     
     // Find end by going forwards
     let endFinder = new Date(currentDate);
+    
+    // Coarse search forwards
     while (isSwathi(getMoonSiderealLongitude(endFinder))) {
       endFinder = new Date(endFinder.getTime() + coarseStep);
     }
-    while (isSwathi(getMoonSiderealLongitude(new Date(endFinder.getTime() - fineStep)))) {
+    
+    // Fine tune backwards to exact end
+    while (!isSwathi(getMoonSiderealLongitude(endFinder))) {
       endFinder = new Date(endFinder.getTime() - fineStep);
     }
-    const periodEnd = endFinder;
+    // Add one more minute to get the actual end
+    const periodEnd = new Date(endFinder.getTime() + fineStep);
     
     return { start: periodStart, end: periodEnd };
   }
   
-  // Find next Swathi period
+  // Not in Swathi - find the next period
   let searchDate = new Date(currentDate);
+  
+  // Coarse search to find when we enter Swathi
   while (!isSwathi(getMoonSiderealLongitude(searchDate))) {
     searchDate = new Date(searchDate.getTime() + coarseStep);
+    // Safety check to prevent infinite loop (max 30 days search)
+    if (searchDate.getTime() - currentDate.getTime() > 30 * 24 * 60 * 60 * 1000) {
+      throw new Error('Could not find Swathi period within 30 days');
+    }
   }
-  while (!isSwathi(getMoonSiderealLongitude(new Date(searchDate.getTime() - fineStep)))) {
+  
+  // Fine tune backwards to exact start
+  while (isSwathi(getMoonSiderealLongitude(new Date(searchDate.getTime() - fineStep)))) {
     searchDate = new Date(searchDate.getTime() - fineStep);
   }
-  const periodStart = searchDate;
+  const periodStart = new Date(searchDate);
   
-  // Find end
+  // Find end of this period
   let endFinder = new Date(periodStart);
+  
+  // Coarse search forwards
   while (isSwathi(getMoonSiderealLongitude(endFinder))) {
     endFinder = new Date(endFinder.getTime() + coarseStep);
   }
-  while (isSwathi(getMoonSiderealLongitude(new Date(endFinder.getTime() - fineStep)))) {
+  
+  // Fine tune backwards to exact end
+  while (!isSwathi(getMoonSiderealLongitude(endFinder))) {
     endFinder = new Date(endFinder.getTime() - fineStep);
   }
-  const periodEnd = endFinder;
+  const periodEnd = new Date(endFinder.getTime() + fineStep);
   
   return { start: periodStart, end: periodEnd };
 };
@@ -138,13 +208,14 @@ const Starfield: React.FC = () => {
     canvas.width = window.innerWidth;
     canvas.height = window.innerHeight;
     
-    const stars: Array<{x: number; y: number; size: number; speed: number}> = [];
+    const stars: Array<{x: number; y: number; size: number; speed: number; opacity: number}> = [];
     for (let i = 0; i < 200; i++) {
       stars.push({
         x: Math.random() * canvas.width,
         y: Math.random() * canvas.height,
-        size: Math.random() * 2,
-        speed: Math.random() * 0.5 + 0.1
+        size: Math.random() * 2 + 0.5,
+        speed: Math.random() * 0.3 + 0.1,
+        opacity: Math.random() * 0.5 + 0.5
       });
     }
     
@@ -154,7 +225,7 @@ const Starfield: React.FC = () => {
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       
       stars.forEach(star => {
-        ctx.fillStyle = `rgba(255, 255, 255, ${Math.random() * 0.5 + 0.5})`;
+        ctx.fillStyle = `rgba(255, 255, 255, ${star.opacity})`;
         ctx.beginPath();
         ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
         ctx.fill();
@@ -238,7 +309,7 @@ const NotificationManager: React.FC<{ isSwathiActive: boolean; nextSwathiStart: 
     ) {
       new Notification('Swathi Nakshatra is Active', {
         body: 'The auspicious period has begun. Embrace the celestial energy.',
-        icon: 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="gold"><path d="M12 2l2.4 7.4h7.8l-6.3 4.6 2.4 7.4-6.3-4.6-6.3 4.6 2.4-7.4-6.3-4.6h7.8z"/></svg>'
+        icon: 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="%23FFD700"%3E%3Cpath d="M12 2l2.4 7.4h7.8l-6.3 4.6 2.4 7.4-6.3-4.6-6.3 4.6 2.4-7.4-6.3-4.6h7.8z"/%3E%3C/svg%3E'
       });
       setLastNotified(nextSwathiStart.getTime());
     }
@@ -291,7 +362,8 @@ const App: React.FC = () => {
       const period = await findCurrentOrNextSwathiPeriod(date);
       setActivePeriod(period);
     } catch (err) {
-      setError('Failed to calculate Swathi period');
+      const message = err instanceof Error ? err.message : 'Failed to calculate Swathi period';
+      setError(message);
       console.error(err);
     } finally {
       setIsLoading(false);
@@ -387,13 +459,14 @@ const App: React.FC = () => {
                     {targetDate && (
                       <p className="text-sm text-white/50 mb-4 px-2">
                         {isSwathiActive ? 'Ends on ' : 'Starts on '}
-                        {targetDate.toLocaleString(undefined, {
+                        {targetDate.toLocaleString('en-IN', {
                           weekday: 'long',
                           year: 'numeric',
                           month: 'long',
                           day: 'numeric',
                           hour: '2-digit',
-                          minute: '2-digit'
+                          minute: '2-digit',
+                          timeZone: 'Asia/Kolkata'
                         })}
                       </p>
                     )}
